@@ -4,6 +4,7 @@ import datetime
 import json
 import os
 from pathlib import Path
+import base64
 
 # 页面设置
 st.set_page_config(
@@ -34,6 +35,30 @@ def load_data():
 def save_data(data):
     with open(DATA_FILE, "w") as f:
         json.dump(data, f, indent=4)
+
+# 删除记录
+def delete_record(record_id):
+    data = load_data()
+    # 找到要删除的记录
+    record_to_delete = None
+    for record in data:
+        if record["id"] == record_id:
+            record_to_delete = record
+            break
+    
+    if record_to_delete:
+        # 如果是图片提交，删除图片文件
+        if record_to_delete["submission_type"] == "图片" and "file_path" in record_to_delete:
+            try:
+                os.remove(record_to_delete["file_path"])
+            except:
+                pass
+        
+        # 从数据中删除记录
+        data = [record for record in data if record["id"] != record_id]
+        save_data(data)
+        return True
+    return False
 
 # 初始化数据
 init_data()
@@ -99,10 +124,32 @@ def task_submission():
                 "task_line": task_line,
                 "task": task,
                 "submission_type": submission_type,
-                "submission_content": "文本内容" if submission_type == "文本" else "图片文件",
                 "submission_time": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "status": "待审核"
             }
+            
+            # 处理提交内容
+            if submission_type == "文本":
+                submission["submission_content"] = submission_content
+            else:  # 图片
+                if submission_content is not None:
+                    # 创建用户文件夹
+                    user_dir = f"submissions/{student_id}_{name}"
+                    os.makedirs(user_dir, exist_ok=True)
+                    
+                    # 保存图片
+                    file_ext = submission_content.name.split(".")[-1]
+                    file_name = f"{task_line}_{task}_{datetime.datetime.now().strftime('%Y%m%d%H%M%S')}.{file_ext}"
+                    file_path = f"{user_dir}/{file_name}"
+                    
+                    with open(file_path, "wb") as f:
+                        f.write(submission_content.getbuffer())
+                    
+                    submission["file_path"] = file_path
+                    submission["submission_content"] = "图片已上传"
+                else:
+                    st.error("请上传图片文件")
+                    return
             
             # 保存数据
             data = load_data()
@@ -110,18 +157,6 @@ def task_submission():
             save_data(data)
             
             st.success("您的任务成果已经进入审核阶段，请耐心等待")
-            
-            # 如果是图片，保存到本地
-            if submission_type == "图片" and submission_content is not None:
-                # 创建用户文件夹
-                user_dir = f"submissions/{student_id}_{name}"
-                os.makedirs(user_dir, exist_ok=True)
-                
-                # 保存图片
-                file_ext = submission_content.name.split(".")[-1]
-                file_name = f"{task_line}_{task}_{datetime.datetime.now().strftime('%Y%m%d%H%M%S')}.{file_ext}"
-                with open(f"{user_dir}/{file_name}", "wb") as f:
-                    f.write(submission_content.getbuffer())
 
 # 用户查询功能
 def user_query():
@@ -145,10 +180,31 @@ def user_query():
             else:
                 st.subheader(f"{name} ({student_id}) 的任务提交记录")
                 
-                # 转换为DataFrame以便显示
-                df = pd.DataFrame(user_submissions)
-                df = df[["task_line", "task", "submission_time", "status"]]
-                st.dataframe(df)
+                for i, submission in enumerate(user_submissions):
+                    with st.expander(f"{submission['task_line']} - {submission['task']} ({submission['submission_time']})"):
+                        st.write(f"小分队: {submission['team']}")
+                        st.write(f"任务线: {submission['task_line']}")
+                        st.write(f"任务: {submission['task']}")
+                        st.write(f"提交时间: {submission['submission_time']}")
+                        st.write(f"状态: {submission['status']}")
+                        
+                        if submission["submission_type"] == "文本":
+                            st.write("提交内容:")
+                            st.text(submission["submission_content"])
+                        else:  # 图片
+                            st.write("提交的图片:")
+                            if "file_path" in submission and os.path.exists(submission["file_path"]):
+                                st.image(submission["file_path"])
+                            else:
+                                st.warning("图片文件不存在")
+                        
+                        # 删除按钮
+                        if st.button("删除此记录", key=f"delete_user_{submission['id']}"):
+                            if delete_record(submission["id"]):
+                                st.success("记录已删除")
+                                st.experimental_rerun()
+                            else:
+                                st.error("删除记录失败")
 
 # 管理者模式
 def admin_mode():
@@ -167,61 +223,127 @@ def admin_mode():
     if not data:
         st.info("尚无任务提交记录")
         return
-        
-    # 显示所有提交记录
-    st.subheader("所有任务提交记录")
     
-    df = pd.DataFrame(data)
+    # 创建两个标签页：待审核和已通过
+    tab1, tab2 = st.tabs(["待审核任务记录", "已审批通过任务记录"])
     
-    # 添加审核复选框
-    for i, row in df.iterrows():
-        col1, col2, col3, col4, col5, col6, col7, col8 = st.columns([1, 1, 1, 1, 1, 1, 1, 2])
+    with tab1:
+        st.subheader("待审核任务记录（包括审批不通过的任务）")
         
-        with col1:
-            st.write(row["name"])
-        with col2:
-            st.write(row["student_id"])
-        with col3:
-            st.write(row["team"])
-        with col4:
-            st.write(row["task_line"])
-        with col5:
-            st.write(row["task"])
-        with col6:
-            st.write(row["submission_time"])
-        with col7:
-            status = st.selectbox(
-                f"状态_{row['id']}",
-                options=["待审核", "审核通过", "审核不通过"],
-                index=0 if row["status"] == "待审核" else 1 if row["status"] == "审核通过" else 2,
-                key=f"status_{row['id']}"
-            )
-        with col8:
-            if st.button("查看详情", key=f"detail_{row['id']}"):
-                st.session_state[f"show_detail_{row['id']}"] = not st.session_state.get(f"show_detail_{row['id']}", False)
+        # 筛选待审核和审核不通过的记录
+        pending_data = [record for record in data if record["status"] != "审核通过"]
+        
+        if not pending_data:
+            st.info("暂无待审核任务")
+        else:
+            # 按提交时间排序
+            pending_data.sort(key=lambda x: x["submission_time"], reverse=True)
             
-            if st.session_state.get(f"show_detail_{row['id']}", False):
-                st.write(f"提交方式: {row['submission_type']}")
-                if row['submission_type'] == "文本":
-                    st.text_area("提交内容", value=row.get('submission_content', ''), height=100, key=f"content_{row['id']}")
-                else:
-                    # 尝试显示图片
-                    user_dir = f"submissions/{row['student_id']}_{row['name']}"
-                    if os.path.exists(user_dir):
-                        files = os.listdir(user_dir)
-                        matching_files = [f for f in files if f.startswith(f"{row['task_line']}_{row['task']}")]
-                        if matching_files:
-                            latest_file = sorted(matching_files)[-1]  # 获取最新的文件
-                            st.image(f"{user_dir}/{latest_file}")
+            for i, record in enumerate(pending_data):
+                with st.expander(f"{record['name']} - {record['task_line']} - {record['task']} ({record['submission_time']})"):
+                    col1, col2 = st.columns(2)
+                    
+                    with col1:
+                        st.write(f"姓名: {record['name']}")
+                        st.write(f"学号: {record['student_id']}")
+                        st.write(f"小分队: {record['team']}")
+                        st.write(f"任务线: {record['task_line']}")
+                    
+                    with col2:
+                        st.write(f"任务: {record['task']}")
+                        st.write(f"提交时间: {record['submission_time']}")
+                        st.write(f"提交方式: {record['submission_type']}")
+                        
+                        # 状态选择
+                        new_status = st.selectbox(
+                            "审核状态",
+                            options=["待审核", "审核通过", "审核不通过"],
+                            index=0 if record["status"] == "待审核" else 1 if record["status"] == "审核通过" else 2,
+                            key=f"status_{record['id']}"
+                        )
+                    
+                    # 显示提交内容
+                    st.write("提交内容:")
+                    if record["submission_type"] == "文本":
+                        st.text(record["submission_content"])
+                    else:  # 图片
+                        if "file_path" in record and os.path.exists(record["file_path"]):
+                            st.image(record["file_path"])
+                        else:
+                            st.warning("图片文件不存在")
+                    
+                    # 审核按钮和删除按钮
+                    col_btn1, col_btn2 = st.columns(2)
+                    with col_btn1:
+                        if st.button("保存审核结果", key=f"save_{record['id']}"):
+                            data = load_data()
+                            for d in data:
+                                if d["id"] == record["id"]:
+                                    d["status"] = new_status
+                                    break
+                            save_data(data)
+                            st.success("审核结果已保存")
+                            st.experimental_rerun()
+                    
+                    with col_btn2:
+                        if st.button("删除此记录", key=f"delete_{record['id']}"):
+                            if delete_record(record["id"]):
+                                st.success("记录已删除")
+                                st.experimental_rerun()
+                            else:
+                                st.error("删除记录失败")
     
-    # 保存审核结果
-    if st.button("保存审核结果"):
-        for i, row in df.iterrows():
-            new_status = st.session_state.get(f"status_{row['id']}", row["status"])
-            data[i]["status"] = new_status
+    with tab2:
+        st.subheader("已审批通过任务记录")
         
-        save_data(data)
-        st.success("审核结果已保存")
+        # 筛选已审核通过的记录
+        approved_data = [record for record in data if record["status"] == "审核通过"]
+        
+        if not approved_data:
+            st.info("暂无已审核通过的任务")
+        else:
+            # 按小队分组，小队内部按姓名分组
+            teams = sorted(set(record["team"] for record in approved_data))
+            
+            for team in teams:
+                st.subheader(f"{team}")
+                
+                # 获取该小队的记录
+                team_records = [record for record in approved_data if record["team"] == team]
+                # 按姓名排序
+                team_records.sort(key=lambda x: x["name"])
+                
+                for record in team_records:
+                    with st.expander(f"{record['name']} - {record['task_line']} - {record['task']}"):
+                        col1, col2 = st.columns(2)
+                        
+                        with col1:
+                            st.write(f"姓名: {record['name']}")
+                            st.write(f"学号: {record['student_id']}")
+                            st.write(f"任务线: {record['task_line']}")
+                        
+                        with col2:
+                            st.write(f"任务: {record['task']}")
+                            st.write(f"提交时间: {record['submission_time']}")
+                            st.write(f"提交方式: {record['submission_type']}")
+                        
+                        # 显示提交内容
+                        st.write("提交内容:")
+                        if record["submission_type"] == "文本":
+                            st.text(record["submission_content"])
+                        else:  # 图片
+                            if "file_path" in record and os.path.exists(record["file_path"]):
+                                st.image(record["file_path"])
+                            else:
+                                st.warning("图片文件不存在")
+                        
+                        # 删除按钮
+                        if st.button("删除此记录", key=f"delete_approved_{record['id']}"):
+                            if delete_record(record["id"]):
+                                st.success("记录已删除")
+                                st.experimental_rerun()
+                            else:
+                                st.error("删除记录失败")
 
 if __name__ == "__main__":
     main()
