@@ -4,7 +4,7 @@ import datetime
 import json
 import os
 from pathlib import Path
-import base64
+import uuid
 
 # 页面设置
 st.set_page_config(
@@ -16,25 +16,29 @@ st.set_page_config(
 
 # 数据存储路径
 DATA_FILE = "task_submissions.json"
+SUBMISSIONS_DIR = "submissions"
+
+# 确保提交目录存在
+os.makedirs(SUBMISSIONS_DIR, exist_ok=True)
 
 # 初始化数据
 def init_data():
     if not os.path.exists(DATA_FILE):
-        with open(DATA_FILE, "w") as f:
+        with open(DATA_FILE, "w", encoding="utf-8") as f:
             json.dump([], f)
 
 # 加载数据
 def load_data():
     try:
-        with open(DATA_FILE, "r") as f:
+        with open(DATA_FILE, "r", encoding="utf-8") as f:
             return json.load(f)
-    except:
+    except (FileNotFoundError, json.JSONDecodeError):
         return []
 
 # 保存数据
 def save_data(data):
-    with open(DATA_FILE, "w") as f:
-        json.dump(data, f, indent=4)
+    with open(DATA_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=4, ensure_ascii=False)
 
 # 删除记录
 def delete_record(record_id):
@@ -50,9 +54,10 @@ def delete_record(record_id):
         # 如果是图片提交，删除图片文件
         if record_to_delete["submission_type"] == "图片" and "file_path" in record_to_delete:
             try:
-                os.remove(record_to_delete["file_path"])
-            except:
-                pass
+                if os.path.exists(record_to_delete["file_path"]):
+                    os.remove(record_to_delete["file_path"])
+            except Exception as e:
+                st.error(f"删除文件时出错: {e}")
         
         # 从数据中删除记录
         data = [record for record in data if record["id"] != record_id]
@@ -115,9 +120,12 @@ def task_submission():
                 st.error("请填写姓名和学号")
                 return
                 
+            # 生成唯一ID
+            submission_id = str(uuid.uuid4())
+            
             # 创建提交记录
             submission = {
-                "id": len(load_data()) + 1,
+                "id": submission_id,
                 "name": name,
                 "student_id": student_id,
                 "team": team,
@@ -133,20 +141,17 @@ def task_submission():
                 submission["submission_content"] = submission_content
             else:  # 图片
                 if submission_content is not None:
-                    # 创建用户文件夹
-                    user_dir = f"submissions/{student_id}_{name}"
-                    os.makedirs(user_dir, exist_ok=True)
+                    # 创建文件名
+                    file_ext = submission_content.name.split(".")[-1]
+                    file_name = f"{student_id}_{name}_{task_line}_{task}_{datetime.datetime.now().strftime('%Y%m%d%H%M%S')}.{file_ext}"
+                    file_path = os.path.join(SUBMISSIONS_DIR, file_name)
                     
                     # 保存图片
-                    file_ext = submission_content.name.split(".")[-1]
-                    file_name = f"{task_line}_{task}_{datetime.datetime.now().strftime('%Y%m%d%H%M%S')}.{file_ext}"
-                    file_path = f"{user_dir}/{file_name}"
-                    
                     with open(file_path, "wb") as f:
                         f.write(submission_content.getbuffer())
                     
                     submission["file_path"] = file_path
-                    submission["submission_content"] = "图片已上传"
+                    submission["submission_content"] = f"图片已上传: {file_name}"
                 else:
                     st.error("请上传图片文件")
                     return
@@ -180,23 +185,29 @@ def user_query():
             else:
                 st.subheader(f"{name} ({student_id}) 的任务提交记录")
                 
-                for i, submission in enumerate(user_submissions):
-                    with st.expander(f"{submission['task_line']} - {submission['task']} ({submission['submission_time']})"):
-                        st.write(f"小分队: {submission['team']}")
-                        st.write(f"任务线: {submission['task_line']}")
-                        st.write(f"任务: {submission['task']}")
-                        st.write(f"提交时间: {submission['submission_time']}")
-                        st.write(f"状态: {submission['status']}")
+                for submission in user_submissions:
+                    with st.expander(f"{submission['task_line']} - {submission['task']} ({submission['submission_time']}) - {submission['status']}"):
+                        col1, col2 = st.columns(2)
                         
+                        with col1:
+                            st.write(f"小分队: {submission['team']}")
+                            st.write(f"任务线: {submission['task_line']}")
+                            st.write(f"任务: {submission['task']}")
+                        
+                        with col2:
+                            st.write(f"提交时间: {submission['submission_time']}")
+                            st.write(f"状态: {submission['status']}")
+                            st.write(f"提交方式: {submission['submission_type']}")
+                        
+                        # 显示提交内容
+                        st.write("提交内容:")
                         if submission["submission_type"] == "文本":
-                            st.write("提交内容:")
-                            st.text(submission["submission_content"])
+                            st.text_area("", value=submission.get("submission_content", "无内容"), height=100, disabled=True)
                         else:  # 图片
-                            st.write("提交的图片:")
                             if "file_path" in submission and os.path.exists(submission["file_path"]):
                                 st.image(submission["file_path"])
                             else:
-                                st.warning("图片文件不存在")
+                                st.warning("图片文件不存在或已被删除")
                         
                         # 删除按钮
                         if st.button("删除此记录", key=f"delete_user_{submission['id']}"):
@@ -239,7 +250,7 @@ def admin_mode():
             # 按提交时间排序
             pending_data.sort(key=lambda x: x["submission_time"], reverse=True)
             
-            for i, record in enumerate(pending_data):
+            for record in pending_data:
                 with st.expander(f"{record['name']} - {record['task_line']} - {record['task']} ({record['submission_time']})"):
                     col1, col2 = st.columns(2)
                     
@@ -253,6 +264,7 @@ def admin_mode():
                         st.write(f"任务: {record['task']}")
                         st.write(f"提交时间: {record['submission_time']}")
                         st.write(f"提交方式: {record['submission_type']}")
+                        st.write(f"当前状态: {record['status']}")
                         
                         # 状态选择
                         new_status = st.selectbox(
@@ -265,12 +277,12 @@ def admin_mode():
                     # 显示提交内容
                     st.write("提交内容:")
                     if record["submission_type"] == "文本":
-                        st.text(record["submission_content"])
+                        st.text_area("", value=record.get("submission_content", "无内容"), height=100, disabled=True)
                     else:  # 图片
                         if "file_path" in record and os.path.exists(record["file_path"]):
                             st.image(record["file_path"])
                         else:
-                            st.warning("图片文件不存在")
+                            st.warning("图片文件不存在或已被删除")
                     
                     # 审核按钮和删除按钮
                     col_btn1, col_btn2 = st.columns(2)
@@ -330,12 +342,12 @@ def admin_mode():
                         # 显示提交内容
                         st.write("提交内容:")
                         if record["submission_type"] == "文本":
-                            st.text(record["submission_content"])
+                            st.text_area("", value=record.get("submission_content", "无内容"), height=100, disabled=True)
                         else:  # 图片
                             if "file_path" in record and os.path.exists(record["file_path"]):
                                 st.image(record["file_path"])
                             else:
-                                st.warning("图片文件不存在")
+                                st.warning("图片文件不存在或已被删除")
                         
                         # 删除按钮
                         if st.button("删除此记录", key=f"delete_approved_{record['id']}"):
